@@ -1,0 +1,469 @@
+// ==========================================================
+//    INDUSTRIAL PUMP CONTROL SYSTEM
+//    STM32 NUCLEO-C031C6
+// ==========================================================
+//
+// A0  = Tank Level Sensor
+// A1  = Pressure Sensor
+// A2  = Current Sensor
+//
+// D2  = Green LED
+// D3  = Yellow LED
+// D4  = Red LED
+//
+// D5  = Green START Button
+// D6  = Yellow STOP Button
+// D7  = Red EMERGENCY Button
+//
+// D8  = Buzzer (Active on Fault)
+// D9  = Relay / Pump
+// D10 = Blue LED
+//
+// Sensor display: 0 - 1000
+// ==========================================================
+
+
+// ---------------- SENSOR PINS ----------------
+
+#define TANK_SENSOR       A0
+#define PRESSURE_SENSOR   A1
+#define CURRENT_SENSOR    A2
+
+
+// ---------------- LED PINS ----------------
+
+#define GREEN_LED         2
+#define YELLOW_LED        3
+#define RED_LED           4
+#define BLUE_LED          10
+
+
+// ---------------- BUTTON PINS ----------------
+
+#define START_BUTTON      5
+#define STOP_BUTTON       6
+#define EMERGENCY_BUTTON  7
+
+
+// ---------------- OUTPUT PINS ----------------
+
+#define BUZZER            8
+#define RELAY             9
+
+
+// ==========================================================
+// LIMITS
+// ==========================================================
+
+#define TANK_LOW          300
+#define TANK_FULL         800
+
+#define DRY_RUN           100
+
+#define PRESSURE_LOW      100
+#define PRESSURE_HIGH     900
+
+#define CURRENT_HIGH      800
+
+
+// ==========================================================
+// SYSTEM STATES
+// ==========================================================
+
+#define IDLE      0
+#define RUNNING   1
+#define FAULT     2
+
+int state = IDLE;
+
+
+// ==========================================================
+// SENSOR VARIABLES
+// ==========================================================
+
+int tank = 0;
+int pressure = 0;
+int current = 0;
+
+String faultReason = "NONE";
+
+
+// ==========================================================
+// SETUP
+// ==========================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // ---------------- SENSOR INPUTS ----------------
+
+  pinMode(TANK_SENSOR, INPUT);
+  pinMode(PRESSURE_SENSOR, INPUT);
+  pinMode(CURRENT_SENSOR, INPUT);
+
+
+  // ---------------- LED OUTPUTS ----------------
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+
+
+  // ---------------- BUTTON INPUTS ----------------
+
+  // Buttons connected between pin and GND
+  pinMode(START_BUTTON, INPUT_PULLUP);
+  pinMode(STOP_BUTTON, INPUT_PULLUP);
+  pinMode(EMERGENCY_BUTTON, INPUT_PULLUP);
+
+
+  // ---------------- OTHER OUTPUTS ----------------
+
+  pinMode(BUZZER, OUTPUT);
+  pinMode(RELAY, OUTPUT);
+
+
+  // ==================================================
+  // INITIAL CONDITION
+  // ==================================================
+
+  digitalWrite(RELAY, LOW);
+  digitalWrite(BUZZER, LOW);
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, HIGH);
+  digitalWrite(RED_LED, LOW);
+
+  // BLUE OFF because pump is OFF
+  digitalWrite(BLUE_LED, LOW);
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("    INDUSTRIAL PUMP SYSTEM");
+  Serial.println("================================");
+  Serial.println("SYSTEM READY");
+  Serial.println();
+}
+
+
+// ==========================================================
+// MAIN LOOP
+// ==========================================================
+
+void loop()
+{
+  // Read sensors continuously
+  readSensors();
+
+
+  // ========================================================
+  // EMERGENCY BUTTON - HIGHEST PRIORITY
+  // ========================================================
+
+  if (digitalRead(EMERGENCY_BUTTON) == LOW)
+  {
+    enterFault("EMERGENCY");
+  }
+
+
+  // ========================================================
+  // IDLE STATE
+  // ========================================================
+
+  if (state == IDLE)
+  {
+    // Pump OFF
+    digitalWrite(RELAY, LOW);
+
+    // LEDs
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(YELLOW_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+
+    // Blue OFF because pump OFF
+    digitalWrite(BLUE_LED, LOW);
+
+    // Buzzer OFF
+    digitalWrite(BUZZER, LOW);
+
+
+    // -----------------------------------------------
+    // START BUTTON
+    // -----------------------------------------------
+
+    if (digitalRead(START_BUTTON) == LOW)
+    {
+      startPump();
+    }
+  }
+
+
+  // ========================================================
+  // RUNNING STATE
+  // ========================================================
+
+  else if (state == RUNNING)
+  {
+    // Pump ON
+    digitalWrite(RELAY, HIGH);
+
+    // Green LED ON
+    digitalWrite(GREEN_LED, HIGH);
+
+    // Yellow OFF
+    digitalWrite(YELLOW_LED, LOW);
+
+    // Red OFF
+    digitalWrite(RED_LED, LOW);
+
+    // Blue ON ONLY while pump is running
+    digitalWrite(BLUE_LED, HIGH);
+
+    // Buzzer OFF
+    digitalWrite(BUZZER, LOW);
+
+
+    // -----------------------------------------------
+    // STOP BUTTON
+    // -----------------------------------------------
+
+    if (digitalRead(STOP_BUTTON) == LOW)
+    {
+      stopPump();
+      return;
+    }
+
+
+    // -----------------------------------------------
+    // EMERGENCY
+    // -----------------------------------------------
+
+    if (digitalRead(EMERGENCY_BUTTON) == LOW)
+    {
+      enterFault("EMERGENCY");
+      return;
+    }
+
+
+    // -----------------------------------------------
+    // OVERLOAD
+    // -----------------------------------------------
+
+    if (current > CURRENT_HIGH)
+    {
+      enterFault("OVERLOAD");
+      return;
+    }
+
+
+    // -----------------------------------------------
+    // PRESSURE FAULT
+    // -----------------------------------------------
+
+    if (pressure < PRESSURE_LOW ||
+        pressure > PRESSURE_HIGH)
+    {
+      enterFault("PRESSURE");
+      return;
+    }
+
+
+    // -----------------------------------------------
+    // DRY RUN
+    // -----------------------------------------------
+
+    if (tank < DRY_RUN)
+    {
+      enterFault("DRY RUN");
+      return;
+    }
+
+
+    // -----------------------------------------------
+    // TANK FULL
+    // -----------------------------------------------
+
+    if (tank >= TANK_FULL)
+    {
+      stopPump();
+      return;
+    }
+  }
+
+
+  // ========================================================
+  // FAULT STATE
+  // ========================================================
+
+  else if (state == FAULT)
+  {
+    // Pump OFF immediately
+    digitalWrite(RELAY, LOW);
+
+    // Green OFF
+    digitalWrite(GREEN_LED, LOW);
+
+    // Yellow OFF
+    digitalWrite(YELLOW_LED, LOW);
+
+    // Red ON
+    digitalWrite(RED_LED, HIGH);
+
+    // Blue OFF because pump OFF
+    digitalWrite(BLUE_LED, LOW);
+
+    // Buzzer ON for any fault
+    digitalWrite(BUZZER, HIGH);
+
+
+    // -----------------------------------------------
+    // RESET USING STOP BUTTON
+    // -----------------------------------------------
+
+    if (digitalRead(STOP_BUTTON) == LOW &&
+        digitalRead(EMERGENCY_BUTTON) == HIGH)
+    {
+      resetFault();
+      return;
+    }
+  }
+
+
+  // ========================================================
+  // SERIAL MONITOR
+  // ========================================================
+
+  printValues();
+
+  // Very small delay only for Serial readability
+  delay(50);
+}
+
+
+// ==========================================================
+// READ SENSORS
+// ==========================================================
+
+void readSensors()
+{
+  int tankRaw = analogRead(TANK_SENSOR);
+  int pressureRaw = analogRead(PRESSURE_SENSOR);
+  int currentRaw = analogRead(CURRENT_SENSOR);
+
+  // STM32 ADC: 0 - 4095 mapped to 0 - 1000
+  tank = map(tankRaw, 0, 4095, 0, 1000);
+  pressure = map(pressureRaw, 0, 4095, 0, 1000);
+  current = map(currentRaw, 0, 4095, 0, 1000);
+
+  // Keep values bounded between 0 and 1000
+  tank = constrain(tank, 0, 1000);
+  pressure = constrain(pressure, 0, 1000);
+  current = constrain(current, 0, 1000);
+}
+
+
+// ==========================================================
+// START PUMP
+// ==========================================================
+
+void startPump()
+{
+  // ... existing checks ...
+  state = RUNNING;
+  faultReason = "NONE";
+
+  digitalWrite(RELAY, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BLUE_LED, HIGH);
+  
+  digitalWrite(BUZZER, LOW);
+  noTone(BUZZER); // Ensure buzzer is off
+}
+
+void stopPump()
+{
+  state = IDLE;
+
+  digitalWrite(RELAY, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, HIGH);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BLUE_LED, LOW);
+  
+  digitalWrite(BUZZER, LOW);
+  noTone(BUZZER); // Stop buzzer sound
+}
+
+void enterFault(String reason)
+{
+  state = FAULT;
+  faultReason = reason;
+
+  digitalWrite(RELAY, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(BLUE_LED, LOW);
+  
+  digitalWrite(BUZZER, HIGH);
+  tone(BUZZER, 1000); // Play 1000 Hz tone for passive buzzer
+
+  Serial.print(">>> FAULT: ");
+  Serial.println(faultReason);
+}
+
+void resetFault()
+{
+  state = IDLE;
+  faultReason = "NONE";
+
+  digitalWrite(RELAY, LOW);
+  digitalWrite(BUZZER, LOW);
+  noTone(BUZZER); // Stop buzzer sound
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, HIGH);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BLUE_LED, LOW);
+
+  Serial.println(">>> FAULT RESET");
+  Serial.println(">>> SYSTEM IDLE");
+}
+
+
+// ==========================================================
+// SERIAL MONITOR
+// ==========================================================
+
+void printValues()
+{
+  Serial.print("Tank : ");
+  Serial.println(tank);
+
+  Serial.print("Pressure : ");
+  Serial.println(pressure);
+
+  Serial.print("Current : ");
+  Serial.println(current);
+
+  Serial.print("State : ");
+
+  if (state == IDLE)
+  {
+    Serial.println("IDLE");
+  }
+  else if (state == RUNNING)
+  {
+    Serial.println("RUNNING");
+  }
+  else if (state == FAULT)
+  {
+    Serial.print("FAULT - ");
+    Serial.println(faultReason);
+  }
+
+  Serial.println("----------------------------");
+}
